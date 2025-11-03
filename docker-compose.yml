@@ -1,0 +1,100 @@
+version: "3.9"
+
+services:
+
+  nginx:
+    build:
+      context: .
+      dockerfile: .docker/nginx/Dockerfile
+    container_name: "${APP_ENV}_${CONTAINER_NAME}_nginx"
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    volumes:
+      - "./.docker/nginx/conf/${APP_ENV}/backend.conf:/etc/nginx/conf.d/x_backend.conf"
+      - ./runtime/nginx:/var/log/nginx
+      - ./backend:/var/www/backend
+    depends_on:
+      - php
+    entrypoint: ["nginx-debug", "-g", "daemon off;"]
+    networks:
+      - contractor
+
+  php:
+    build:
+      context: .
+      dockerfile: .docker/php/Dockerfile
+      args:
+        - WITH_XDEBUG=true
+        - APP_ENV=${APP_ENV}
+    container_name: "${APP_ENV}_${CONTAINER_NAME}_php"
+    restart: unless-stopped
+    environment:
+      XDEBUG_CONFIG: "remote_host=192.168.220.1 remote_enable=1"
+      PHP_IDE_CONFIG: "serverName=Docker"
+      PHP_ENABLE_XDEBUG: 1
+      PGPASSFILE: "/var/local/.pgpass"
+    depends_on:
+      - postgresql
+    volumes:
+      - ./backend:/var/www/backend
+      - "./.docker/php/ini/php-dev.ini:/usr/local/etc/php/conf.d/xx-custom.ini"
+    ports:
+      - "8080:8080"
+    networks:
+      - contractor
+
+  postgresql:
+    hostname: ${DB_HOST}
+    container_name: "${APP_ENV}_${CONTAINER_NAME}_postgres"
+    restart: unless-stopped
+    build:
+      context: ./.docker/postgres
+    environment:
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_USER: ${DB_USERNAME}
+      POSTGRES_DB: ${DB_DATABASE}
+      PGDATA: "/var/lib/postgresql/data/pgdata"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USERNAME} -d ${DB_DATABASE}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 4G
+    ports:
+      - "${DB_PORT}:5432"
+    networks:
+      - contractor
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  vue:
+    container_name: "${APP_ENV}_${CONTAINER_NAME}_vue"
+    tty: true
+    build:
+      context: ./.docker/vue
+    volumes:
+      - ./frontend:/var/www/frontend:rw
+    ports:
+      - "${NUXT_PORT}:3000"
+      - "24678:24678"
+    tmpfs: /tmp
+    networks:
+      - contractor
+
+volumes:
+  pgdata:
+    driver: local
+  pgdata_test:
+    driver: local
+  vue-app:
+    driver: local
+
+networks:
+  contractor:
+    driver: bridge
