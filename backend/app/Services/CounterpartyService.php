@@ -60,9 +60,13 @@ class CounterpartyService
         }
 
         $cacheKey = "dadata:inn:{$dto->inn}";
-        $parsed = Cache::get($cacheKey);
-        if (! is_null($parsed)) {
-            return $this->persistCounterparty($user->id, $dto->inn, $parsed);
+        $cached = Cache::get($cacheKey);
+
+        if (!is_null($cached)) {
+            if (!empty($cached['not_found'])) {
+                throw new ExternalApiException('dialogue.external_api.not_found', 404);
+            }
+            return $this->persistCounterparty($user->id, $dto->inn, $cached);
         }
 
         $url = "{$base}/findById/party";
