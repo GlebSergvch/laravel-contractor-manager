@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Services;
 
 use App\DTO\Counterparty\CreateCounterpartyDto;
+use App\Exceptions\ExternalApiException;
 use App\Models\Counterparty;
 use App\Models\User;
 use Illuminate\Http\Client\RequestException;
@@ -12,7 +13,6 @@ use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
-use Illuminate\Validation\ValidationException;
 
 class CounterpartyService
 {
@@ -25,7 +25,6 @@ class CounterpartyService
 
     public function __construct()
     {
-        // configurable через config/services.php или ENV, по умолчанию 24 часа
         $this->cacheTtl = (int) config('services.dadata.cache_ttl', 3600 * 24);
     }
 
@@ -36,11 +35,10 @@ class CounterpartyService
      * @param CreateCounterpartyDto $dto
      * @return Counterparty
      *
-     * @throws ValidationException
+     * @throws ExternalApiException
      */
     public function createFromInn(User $user, CreateCounterpartyDto $dto): Counterparty
     {
-        // Если уже добавлен — возвращаем существующую запись.
         $existing = Counterparty::where('user_id', $user->id)
             ->where('inn', $dto->inn)
             ->first();
@@ -58,14 +56,10 @@ class CounterpartyService
                 'base_config' => $base !== '',
             ]);
 
-            throw ValidationException::withMessages([
-                'inn' => ['External service unavailable'],
-            ]);
+            throw new ExternalApiException('dialogue.external_api.unavailable', 502);
         }
 
         $cacheKey = "dadata:inn:{$dto->inn}";
-
-        // Попытаться получить из кэша
         $parsed = Cache::get($cacheKey);
         if (! is_null($parsed)) {
             return $this->persistCounterparty($user->id, $dto->inn, $parsed);
@@ -90,23 +84,17 @@ class CounterpartyService
                 'error' => $e->getMessage(),
             ]);
 
-            throw ValidationException::withMessages([
-                'inn' => ['Failed to contact external service'],
-            ]);
+            throw new ExternalApiException('dialogue.external_api.unavailable', 502);
         }
 
-        // Rate limit
         if ($response->status() === 429) {
             Log::warning('DaData rate limit', ['inn' => $dto->inn]);
-            throw ValidationException::withMessages([
-                'inn' => ['External service rate limit, try later'],
-            ]);
+            throw new ExternalApiException('dialogue.external_api.rate_limit', 429);
         }
 
         try {
             $response->throw();
         } catch (RequestException $e) {
-            // Ограничиваем длину тела в логах и не логируем заголовки с токеном
             $body = (string) $e->response?->body();
             Log::error('DaData returned error', [
                 'status' => $e->response?->status(),
@@ -114,40 +102,29 @@ class CounterpartyService
                 'inn' => $dto->inn,
             ]);
 
-            throw ValidationException::withMessages([
-                'inn' => ['External service returned error'],
-            ]);
+            throw new ExternalApiException('dialogue.external_api.returned_error', 502);
         }
 
         $json = $response->json();
-
         $suggestions = $json['suggestions'] ?? [];
+
         if (empty($suggestions)) {
-            // кешируем пустой результат короткое время, чтобы не бить DaData повторно
-            Cache::put($cacheKey, ['not_found' => true], 60 * 5); // 5 минут
-            throw ValidationException::withMessages([
-                'inn' => ['Counterparty not found by INN'],
-            ]);
+            Cache::put($cacheKey, ['not_found' => true], 60 * 5);
+            throw new ExternalApiException('dialogue.external_api.not_found', 404);
         }
 
         $data = $suggestions[0]['data'] ?? [];
-
-        // Парсим необходимые поля (с запасом на возможные структуры)
-        $name = $data['name']['short_with_opf'] ?? $data['name']['short'] ??
-            $data['name']['full_with_opf'] ?? null;
+        $name = $data['name']['short_with_opf'] ?? $data['name']['short'] ?? $data['name']['full_with_opf'] ?? null;
         $ogrn = $data['ogrn'] ?? null;
         $address = $data['address']['unrestricted_value'] ?? null;
 
         if (empty($name)) {
             Log::warning('DaData returned incomplete data', [
                 'inn' => $dto->inn,
-                // Не кладём весь $json в лог — только превью
                 'response_preview' => Str::limit(json_encode($json), 1000),
             ]);
 
-            throw ValidationException::withMessages([
-                'inn' => ['Incomplete data from external service'],
-            ]);
+            throw new ExternalApiException('dialogue.external_api.incomplete_data', 502);
         }
 
         $parsed = [
@@ -157,7 +134,6 @@ class CounterpartyService
             'raw' => $json,
         ];
 
-        // Кешируем успешный ответ (parsed) для уменьшения числа запросов к DaData
         Cache::put($cacheKey, $parsed, $this->cacheTtl);
 
         return $this->persistCounterparty($user->id, $dto->inn, $parsed);
@@ -173,7 +149,6 @@ class CounterpartyService
      */
     private function persistCounterparty(int $userId, string $inn, array $parsed): Counterparty
     {
-        // Ещё раз проверим атомарно — на случай гонки между параллельными запросами
         $existing = Counterparty::where('user_id', $userId)
             ->where('inn', $inn)
             ->first();
