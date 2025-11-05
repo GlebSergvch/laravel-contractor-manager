@@ -33,3 +33,5 @@ cp .env.example .env
 ```bash
 make setup
 ```
+
+4. **Перейти на http://127.0.0.1/backend/api/documentation**
