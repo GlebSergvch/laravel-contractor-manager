@@ -39,6 +39,7 @@ return [
         'token'    => env('DADATA_TOKEN'),
         'secret'   => env('DADATA_SECRET'),
         'base_url' => env('DADATA_BASE_URL', 'https://suggestions.dadata.ru/suggestions/api/4_1/rs'),
+        'cache_ttl' => env('DADATA_CACHE_TTL', 86400),
     ],
 
 ];

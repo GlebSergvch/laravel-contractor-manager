@@ -39,6 +39,7 @@ class CounterpartyService
      */
     public function createFromInn(User $user, CreateCounterpartyDto $dto): Counterparty
     {
+        // Если уже добавлен — возвращаем существующую запись.
         $existing = Counterparty::where('user_id', $user->id)
             ->where('inn', $dto->inn)
             ->first();
@@ -60,13 +61,16 @@ class CounterpartyService
         }
 
         $cacheKey = "dadata:inn:{$dto->inn}";
-        $cached = Cache::get($cacheKey);
 
-        if (!is_null($cached)) {
-            if (!empty($cached['not_found'])) {
+        // Попытаться получить из кэша
+        $parsed = Cache::get($cacheKey);
+        if (! is_null($parsed)) {
+            // если в кэше пометка not_found — бросаем 404
+            if (!empty($parsed['not_found'])) {
                 throw new ExternalApiException('dialogue.external_api.not_found', 404);
             }
-            return $this->persistCounterparty($user->id, $dto->inn, $cached);
+
+            return $this->persistCounterparty($user->id, $dto->inn, $parsed);
         }
 
         $url = "{$base}/findById/party";
@@ -91,14 +95,16 @@ class CounterpartyService
             throw new ExternalApiException('dialogue.external_api.unavailable', 502);
         }
 
+        // Rate limit
         if ($response->status() === 429) {
             Log::warning('DaData rate limit', ['inn' => $dto->inn]);
             throw new ExternalApiException('dialogue.external_api.rate_limit', 429);
         }
 
         try {
-            $response->throw();
+            $response->throw(); // пробросит RequestException при 4xx/5xx
         } catch (RequestException $e) {
+            // Ограничиваем длину тела в логах и не логируем заголовки с токеном
             $body = (string) $e->response?->body();
             Log::error('DaData returned error', [
                 'status' => $e->response?->status(),
@@ -106,19 +112,25 @@ class CounterpartyService
                 'inn' => $dto->inn,
             ]);
 
-            throw new ExternalApiException('dialogue.external_api.returned_error', 502);
+            // Если 404/422 - можно вернуть понятную ошибку, но тут обобщим
+            throw new ExternalApiException('dialogue.external_api.unavailable', 502);
         }
 
+        // получаем массив из ответа — НЕ сохраняем объект ответа целиком
         $json = $response->json();
-        $suggestions = $json['suggestions'] ?? [];
 
+        $suggestions = $json['suggestions'] ?? [];
         if (empty($suggestions)) {
-            Cache::put($cacheKey, ['not_found' => true], 60 * 5);
+            // кешируем пустой результат короткое время
+            Cache::put($cacheKey, ['not_found' => true], 60 * 5); // 5 минут
             throw new ExternalApiException('dialogue.external_api.not_found', 404);
         }
 
         $data = $suggestions[0]['data'] ?? [];
-        $name = $data['name']['short_with_opf'] ?? $data['name']['short'] ?? $data['name']['full_with_opf'] ?? null;
+
+        // Парсим необходимые поля (с запасом на возможные структуры)
+        $name = $data['name']['short_with_opf'] ?? $data['name']['short'] ??
+            $data['name']['full_with_opf'] ?? null;
         $ogrn = $data['ogrn'] ?? null;
         $address = $data['address']['unrestricted_value'] ?? null;
 
@@ -128,21 +140,21 @@ class CounterpartyService
                 'response_preview' => Str::limit(json_encode($json), 1000),
             ]);
 
-            throw new ExternalApiException('dialogue.external_api.incomplete_data', 502);
+            throw new ExternalApiException('dialogue.external_api.unavailable', 502);
         }
 
         $parsed = [
             'name' => $name,
             'ogrn' => $ogrn,
             'address' => $address,
-            'raw' => $json,
+            'raw' => $json, // массив, безопасно для json-колонки
         ];
 
+        // Кешируем успешный ответ (parsed)
         Cache::put($cacheKey, $parsed, $this->cacheTtl);
 
         return $this->persistCounterparty($user->id, $dto->inn, $parsed);
     }
-
     /**
      * Записать контрагента в БД (в отдельный метод для тестируемости и повторного использования).
      *
