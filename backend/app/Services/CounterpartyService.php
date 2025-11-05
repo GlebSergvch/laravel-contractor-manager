@@ -200,8 +200,7 @@ class CounterpartyService
      */
     public function listForUser(User $user, int $perPage = 15)
     {
-        return Counterparty::where('user_id', $user->id)
-            ->orderByDesc('created_at')
+        return Counterparty::orderByDesc('created_at')
             ->paginate($perPage);
     }
 }
