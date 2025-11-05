@@ -40,6 +40,7 @@ class CreateCounterpartyRequest extends AbstractApiRequest
         return [
             'inn.required' => 'ИНН обязателен.',
             'inn.regex'    => 'ИНН должен содержать 10 или 12 цифр.',
+            'inn.unique'   => 'ИНН уже существует',
         ];
     }
 }
